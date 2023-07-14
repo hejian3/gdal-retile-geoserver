@@ -3,14 +3,19 @@ package org.example;
 import it.geosolutions.geoserver.rest.GeoServerRESTManager;
 import it.geosolutions.geoserver.rest.GeoServerRESTPublisher;
 import it.geosolutions.geoserver.rest.GeoServerRESTReader;
+import it.geosolutions.geoserver.rest.decoder.RESTLayer;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.io.FileUtils;
 import org.apache.http.HttpStatus;
 import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.entity.ByteArrayEntity;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClientBuilder;
+import org.dom4j.Document;
+import org.dom4j.io.SAXReader;
 
 import java.io.BufferedWriter;
 import java.io.File;
@@ -19,7 +24,9 @@ import java.io.IOException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.stream.Collectors;
 
 @Slf4j
 public class PublishServiceUtilsTest {
@@ -37,6 +44,13 @@ public class PublishServiceUtilsTest {
         return httpPost;
     }
 
+    private HttpGet getHttpGet(String httpUrl, String contentType) {
+        HttpGet httpGet = new HttpGet(httpUrl);
+        httpGet.setHeader("Authorization", "Basic " + getUserEncoding());
+        httpGet.setHeader("Content-type", contentType);
+        return httpGet;
+    }
+
     private String getUserEncoding() {
         return Base64.getUrlEncoder().encodeToString((geoserverUserName + ":" + geoserverPassWord).getBytes());
     }
@@ -46,7 +60,7 @@ public class PublishServiceUtilsTest {
             return new GeoServerRESTManager(new URL(geoserverUrl), geoserverUserName, geoserverPassWord);
         } catch (Exception e) {
             e.printStackTrace();
-            throw new IllegalStateException(e.getMessage());
+            throw new RuntimeException(e.getMessage());
         }
     }
 
@@ -87,7 +101,8 @@ public class PublishServiceUtilsTest {
                     log.error("----------添加本地二维数据源失败，{}----------", resp);
                     return false;
             }
-            file.delete();
+            httpClient.close();
+            FileUtils.deleteQuietly(file);
         } catch (Exception e) {
             log.error("----------添加本地二维数据源失败，{}----------", e.getMessage());
         }
@@ -95,7 +110,7 @@ public class PublishServiceUtilsTest {
         return true;
     }
 
-    private static File getTiffXml(String workspaces, String storeName, String dataPath, String fileName) {
+    private File getTiffXml(String workspaces, String storeName, String dataPath, String fileName) {
         log.info("===getTiffXml===dataPath = {}", dataPath);
         String content = "<coverageStore>" +
                 "<name>" + storeName + "</name>" +
@@ -115,8 +130,57 @@ public class PublishServiceUtilsTest {
     }
 
     public static void main(String[] args) throws IOException {
-        new PublishServiceUtilsTest().addTiffNewLocalStore("test", "test4", "D:\\tiff", "");
-        new PublishServiceUtilsTest().addNewLayer("test", "test4", "sadsa3", "EPSG:4326");
+        PublishServiceUtilsTest publishServiceUtilsTest = new PublishServiceUtilsTest();
+        String workspaces = "test";
+        String storeName = "s_" + System.currentTimeMillis();
+        String layerName = "l_" + System.currentTimeMillis();
+        publishServiceUtilsTest.addTiffNewLocalStore(workspaces, storeName, "D:\\tiff", "");
+        publishServiceUtilsTest.addNewLayer(workspaces, storeName, layerName, "EPSG:4326");
+        GeoServerRESTManager manager = publishServiceUtilsTest.getGeoServerRestManager();
+        GeoServerRESTReader reader = manager.getReader();
+        RESTLayer layer = reader.getLayer(workspaces, layerName);
+        System.out.println(publishServiceUtilsTest.getOpenLayerUrl(workspaces, layerName, layer));
+    }
+
+    private String getOpenLayerUrl(String workspace, String layerName, RESTLayer layer) {
+        String[] coordinates = getFeatures(layer.getResourceUrl());
+        String str = Arrays.stream(coordinates).limit(4).map(Double::parseDouble).map(String::valueOf).collect(Collectors.joining(","));
+        return geoserverUrl + "/" + workspace + "/wfs?service=WMS&version=1.1.0" +
+                "&request=GetMap" + "&layers=" + workspace + ":" + layerName + "&bbox=" + str + "&width=768&height=762&srs=" +
+                coordinates[4] + "&styles=&format=application/openlayers";
+    }
+
+    private File getFeaturesFile(String resourceUrl) {
+        try (CloseableHttpClient httpClient = HttpClientBuilder.create().build();) {
+            File destFile = new File(System.currentTimeMillis() + ".xml");
+            HttpGet get = getHttpGet(resourceUrl, "text/xml");
+            CloseableHttpResponse response = httpClient.execute(get);
+            FileUtils.copyInputStreamToFile(response.getEntity().getContent(), destFile);
+            return destFile;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String[] getFeatures(String resourceUrl) {
+        File file = getFeaturesFile(resourceUrl);
+        try {
+            SAXReader saxReader = new SAXReader();
+            Document document = saxReader.read(file);
+            //读取文件 转换成Document
+            String[] coordinates = new String[5];
+            coordinates[0] = document.selectSingleNode("coverage/latLonBoundingBox/minx").getText();
+            coordinates[1] = document.selectSingleNode("coverage/latLonBoundingBox/miny").getText();
+            coordinates[2] = document.selectSingleNode("coverage/latLonBoundingBox/maxx").getText();
+            coordinates[3] = document.selectSingleNode("coverage/latLonBoundingBox/maxy").getText();
+            coordinates[4] = document.selectSingleNode("coverage/latLonBoundingBox/crs").getText();
+            return coordinates;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        } finally {
+            FileUtils.deleteQuietly(file);
+        }
     }
 
 
